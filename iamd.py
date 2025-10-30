@@ -81,7 +81,7 @@ def get_audio_files(identifier):
 def download_file(identifier, filename):
     url = f"https://archive.org/download/{identifier}/{filename}"
     path = os.path.join(DOWNLOAD_FOLDER, filename)
-    print(f"\n📥 Скачивание: {filename}")
+    print(f"\n Скачивание: {filename}")
     try:
         r = requests.get(url, stream=True, timeout=30)
         r.raise_for_status()
@@ -90,14 +90,14 @@ def download_file(identifier, filename):
             for chunk in r.iter_content(8192):
                 f.write(chunk)
                 pb.update(len(chunk))
-        print(f"✅ Сохранено: {path}")
+        print(f" Сохранено: {path}")
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f" Ошибка: {e}")
 
 # === Выбор файла (или all) ===
 def choose_file_from_archive(identifier, title):
     clear_screen()
-    print(f"📁 Архив: {title}")
+    print(f" Архив: {title}")
     print("Загрузка списка файлов...")
     
     files = get_audio_files(identifier)
@@ -107,7 +107,7 @@ def choose_file_from_archive(identifier, title):
 
     while True:
         clear_screen()
-        print(f"📁 Архив: {title}")
+        print(f" Архив: {title}")
         print("Найдены аудиофайлы:")
         print("-" * 70)
         for i, f in enumerate(files):
@@ -165,7 +165,7 @@ def main():
         return len(results)
 
     if load_more() == 0:
-        print("❌ Ничего не найдено.")
+        print("Ничего не найдено.")
         input("Нажмите Enter...")
         return
 
@@ -235,12 +235,12 @@ def main():
             if download_all:
                 all_files = get_audio_files(identifier)
                 if all_files:
-                    print(f"\n📥 Скачивание всех {len(all_files)} файлов из '{title}'...")
+                    print(f"\n Скачивание всех {len(all_files)} файлов из '{title}'...")
                     for f in all_files:
                         download_file(identifier, f['name'])
-                    input("\n✅ Все файлы скачаны! Нажмите Enter...")
+                    input("\n Все файлы скачаны! Нажмите Enter...")
                 else:
-                    input("❌ Нет файлов для скачивания. Нажмите Enter...")
+                    input("Нет файлов для скачивания. Нажмите Enter...")
             elif filename:
                 download_file(identifier, filename)
 
