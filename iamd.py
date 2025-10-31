@@ -1,18 +1,69 @@
 import os
 import sys
 import requests
+import threading
+import time
+import sqlite3
+from datetime import datetime
 from urllib.parse import quote
-from tqdm import tqdm
 import termios
 import tty
+
+# === Попытка импорта libtorrent (только для анализа метаданных) ===
+TORRENT_ENABLED = False
+try:
+    import libtorrent as lt
+    TORRENT_ENABLED = True
+except ImportError:
+    pass
 
 # === Настройки ===
 DOWNLOAD_FOLDER = os.path.expanduser("~/Music/free_archive")
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+DB_PATH = os.path.join(DOWNLOAD_FOLDER, "archive_downloads.db")
 RESULTS_PER_PAGE = 20
 MAX_LINES = 12
 
-# === Вспомогательные функции ===
+# === База данных (без изменений) ===
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS downloads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            archive_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            local_path TEXT NOT NULL,
+            downloaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def is_already_downloaded(archive_id, filename):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT local_path FROM downloads WHERE archive_id = ? AND filename = ?",
+        (archive_id, filename)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row and os.path.exists(row[0]):
+        return row[0]
+    return None
+
+def add_to_db(archive_id, filename, local_path):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO downloads (archive_id, filename, local_path) VALUES (?, ?, ?)",
+        (archive_id, filename, local_path)
+    )
+    conn.commit()
+    conn.close()
+
+# === Вспомогательные функции (без изменений) ===
 def read_key():
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -41,7 +92,7 @@ def human_size(size_bytes):
 def fetch_page(query, page, per_page=RESULTS_PER_PAGE):
     url = "https://archive.org/advancedsearch.php"
     params = {
-        'q': f'(collection:(etree OR audio_music OR opensource_audio)) AND (title:({quote(query)}) OR creator:({quote(query)}))',
+        'q': f'(collection:(etree OR audio_music OR opensource_audio OR opensource_movies)) AND (title:({quote(query)}) OR creator:({quote(query)}))',
         'fl[]': ['identifier', 'title', 'creator', 'downloads'],
         'sort[]': 'downloads desc',
         'rows': per_page,
@@ -57,100 +108,245 @@ def fetch_page(query, page, per_page=RESULTS_PER_PAGE):
         pass
     return [], 0
 
-def get_audio_files(identifier):
+def get_all_files(identifier):
+    """Получает ВСЕ файлы из архива (включая .torrent)"""
     try:
         data = requests.get(f"https://archive.org/metadata/{identifier}", timeout=10).json()
-        files = data.get('files', [])
-        audio_files = [
-            f for f in files
-            if f.get('format') in ['VBR MP3', 'MP3', 'FLAC', 'Ogg Vorbis', 'WAVE']
-            and f.get('source') == 'original'
-            and f.get('name')
-        ]
-        # Сортировка: MP3 перед FLAC, маленькие перед большими
-        def sort_key(f):
-            fmt = f.get('format', '')
-            size = int(f.get('size', 0))
-            is_mp3 = 'MP3' in fmt
-            return (0 if is_mp3 else 1, size)
-        audio_files.sort(key=sort_key)
-        return audio_files
+        return data.get('files', [])
     except:
         return []
 
-def download_file(identifier, filename):
-    url = f"https://archive.org/download/{identifier}/{filename}"
-    path = os.path.join(DOWNLOAD_FOLDER, filename)
-    print(f"\n Скачивание: {filename}")
-    try:
-        r = requests.get(url, stream=True, timeout=30)
-        r.raise_for_status()
-        total = int(r.headers.get('content-length', 0))
-        with open(path, 'wb') as f, tqdm(total=total, unit='B', unit_scale=True, desc="Загрузка") as pb:
-            for chunk in r.iter_content(8192):
-                f.write(chunk)
-                pb.update(len(chunk))
-        print(f" Сохранено: {path}")
-    except Exception as e:
-        print(f" Ошибка: {e}")
+def get_audio_files(all_files):
+    return [
+        f for f in all_files
+        if f.get('format') in ['VBR MP3', 'MP3', 'FLAC', 'Ogg Vorbis', 'WAVE']
+        and f.get('source') == 'original'
+        and f.get('name')
+    ]
 
-# === Выбор файла (или all) ===
-def choose_file_from_archive(identifier, title):
+def get_torrent_files(all_files):
+    return [
+        f for f in all_files
+        if f.get('name', '').endswith('.torrent')
+    ]
+
+# === Анализ торрента из архива ===
+def analyze_torrent_from_archive(identifier, torrent_file):
+    """Скачивает .torrent и возвращает список файлов внутри"""
+    if not TORRENT_ENABLED:
+        return None, "libtorrent не установлен"
+
+    url = f"https://archive.org/download/{identifier}/{torrent_file['name']}"
+    try:
+        # Скачиваем .torrent во временный файл
+        temp_path = os.path.join(DOWNLOAD_FOLDER, f".temp_{torrent_file['name']}")
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        with open(temp_path, 'wb') as f:
+            f.write(r.content)
+
+        # Парсим метаданные
+        info = lt.torrent_info(temp_path)
+        files = []
+        for i, f in enumerate(info.files()):
+            files.append({
+                'index': i,
+                'path': f.path,
+                'size': f.size
+            })
+        
+        # Удаляем временный файл
+        os.remove(temp_path)
+        return files, None
+    except Exception as e:
+        return None, str(e)
+
+# === Загрузка выбранных файлов из торрента ===
+def download_selected_from_torrent(identifier, torrent_file, selected_indices):
+    """Скачивает .torrent, затем выбранные файлы через libtorrent"""
+    def _download():
+        if not TORRENT_ENABLED:
+            print("❌ libtorrent не установлен")
+            return
+
+        # Скачиваем .torrent
+        url = f"https://archive.org/download/{identifier}/{torrent_file['name']}"
+        torrent_path = os.path.join(DOWNLOAD_FOLDER, torrent_file['name'])
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            with open(torrent_path, 'wb') as f:
+                f.write(r.content)
+        except Exception as e:
+            print(f"❌ Не удалось скачать .torrent: {e}")
+            return
+
+        try:
+            ses = lt.session()
+            ses.listen_on(6881, 6891)
+            info = lt.torrent_info(torrent_path)
+            handle = ses.add_torrent({'ti': info, 'save_path': DOWNLOAD_FOLDER})
+
+            # Отключаем всё, кроме выбранных
+            priorities = [0] * info.num_files()
+            for idx in selected_indices:
+                if 0 <= idx < len(priorities):
+                    priorities[idx] = 4
+            handle.prioritize_files(priorities)
+            handle.resume()
+
+            print(f"\n📥 Загрузка {len(selected_indices)} файлов...")
+            while not handle.is_seed():
+                s = handle.status()
+                print(f"\rПрогресс: {s.progress * 100:.1f}% | Скорость: {s.download_rate / 1000:.1f} kB/s", end='', flush=True)
+                time.sleep(1)
+                if s.progress >= 1.0:
+                    break
+            print("\n✅ Готово!")
+        except Exception as e:
+            print(f"\n❌ Ошибка: {e}")
+
+    thread = threading.Thread(target=_download, daemon=True)
+    thread.start()
+
+# === Выбор из архива: аудио ИЛИ торрент ===
+def choose_from_archive(identifier, title):
     clear_screen()
-    print(f" Архив: {title}")
+    print(f"Архив: {title}")
     print("Загрузка списка файлов...")
-    
-    files = get_audio_files(identifier)
-    if not files:
-        input("❌ Аудиофайлы не найдены. Нажмите Enter...")
-        return None, False
+
+    all_files = get_all_files(identifier)
+    if not all_files:
+        input("Файлы не найдены. Нажмите Enter...")
+        return
+
+    audio_files = get_audio_files(all_files)
+    torrent_files = get_torrent_files(all_files)
 
     while True:
         clear_screen()
-        print(f" Архив: {title}")
-        print("Найдены аудиофайлы:")
-        print("-" * 70)
-        for i, f in enumerate(files):
-            name = f['name']
-            fmt = f.get('format', '???')
-            size = human_size(int(f.get('size', 0)))
-            print(f"{i+1:2}. {name} | {fmt} | {size}")
-        print("-" * 70)
-        print("Введите номер файла, 'all' для скачивания всех или 'q' для отмены:")
+        print(f"Архив: {title}")
+        options = []
+
+        if audio_files:
+            print("Аудиофайлы:")
+            for i, f in enumerate(audio_files):
+                size = human_size(int(f.get('size', 0)))
+                already = is_already_downloaded(identifier, f['name'])
+                mark = "[✓]" if already else "[ ]"
+                print(f"  A{i+1}. {mark} {f['name']} | {size}")
+            options.append('audio')
+            print()
+
+        if torrent_files:
+            print("Торренты:")
+            for i, f in enumerate(torrent_files):
+                size = human_size(int(f.get('size', 0)))
+                print(f"  T{i+1}. {f['name']} | {size}")
+            options.append('torrent')
+            print()
+
+        if not options:
+            print("Нет аудиофайлов или торрентов.")
+            input("Нажмите Enter...")
+            return
+
+        print("Введите команду:")
+        if 'audio' in options:
+            print("  a<N> — скачать аудиофайл (например: a1)")
+        if 'torrent' in options:
+            print("  t<N> — открыть торрент (например: t1)")
+        print("  q — выход")
 
         choice = input("> ").strip().lower()
-        
+
         if choice == 'q':
-            return None, False
-        
-        elif choice == 'all':
-            return None, True
-        
-        elif choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(files):
-                return files[idx]['name'], False
-            else:
-                print("Неверный номер.")
-        else:
-            print("Неизвестная команда. Используйте номер, 'all' или 'q'.")
-        
+            return
+
+        # Аудио
+        if choice.startswith('a') and choice[1:].isdigit():
+            idx = int(choice[1:]) - 1
+            if 0 <= idx < len(audio_files):
+                f = audio_files[idx]
+                if is_already_downloaded(identifier, f['name']):
+                    print("Файл уже скачан.")
+                else:
+                    print("Загрузка запущена...")
+                    download_file_simple(identifier, f['name'])
+                input("Нажмите Enter...")
+                return
+
+        # Торрент
+        if choice.startswith('t') and choice[1:].isdigit():
+            idx = int(choice[1:]) - 1
+            if 0 <= idx < len(torrent_files):
+                torrent_file = torrent_files[idx]
+                print(f"Анализ торрента: {torrent_file['name']}...")
+                files, error = analyze_torrent_from_archive(identifier, torrent_file)
+                if error:
+                    print(f"❌ {error}")
+                    input("Нажмите Enter...")
+                    continue
+
+                # Выбор файлов из торрента
+                while True:
+                    clear_screen()
+                    print(f"Файлы в торренте: {torrent_file['name']}")
+                    print("-" * 70)
+                    for i, f in enumerate(files):
+                        size_mb = f['size'] / (1024**2)
+                        print(f"{i+1:2}. {f['path']} ({size_mb:.1f} МБ)")
+                    print("-" * 70)
+                    print("Введите номера через запятую (1,3) или 'q' для отмены:")
+
+                    sel = input("> ").strip()
+                    if sel.lower() == 'q':
+                        break
+                    try:
+                        indices = [int(x.strip()) - 1 for x in sel.split(',')]
+                        if all(0 <= i < len(files) for i in indices):
+                            download_selected_from_torrent(identifier, torrent_file, indices)
+                            input("Загрузка запущена. Нажмите Enter...")
+                            return
+                        else:
+                            print("Неверные номера.")
+                    except ValueError:
+                        print("Неверный формат.")
+                    input("Нажмите Enter...")
+                return
+
+        print("Неверная команда.")
         input("Нажмите Enter...")
 
-# === Основной цикл ===
+# === Простая загрузка аудио (без tqdm) ===
+def download_file_simple(identifier, filename):
+    def _download():
+        url = f"https://archive.org/download/{identifier}/{filename}"
+        clean_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename)
+        path = os.path.join(DOWNLOAD_FOLDER, clean_name)
+        try:
+            r = requests.get(url, stream=True, timeout=30)
+            r.raise_for_status()
+            with open(path, 'wb') as f:
+                for chunk in r.iter_content(8192):
+                    f.write(chunk)
+            add_to_db(identifier, filename, path)
+            print(f"\n✅ Сохранено: {path}")
+        except Exception as e:
+            print(f"\n❌ Ошибка: {e}")
+    threading.Thread(target=_download, daemon=True).start()
+
+# === Основной цикл (без изменений, кроме вызова choose_from_archive) ===
 def main():
+    init_db()
     clear_screen()
     try:
-        query = input("🔍 Введите запрос (только бесплатная музыка): ").strip()
+        query = input("Введите запрос: ").strip()
     except KeyboardInterrupt:
-        print("\nВыход.")
         return
-
     if not query:
-        print("Пустой запрос.")
         return
 
-    # Загрузка результатов
     all_results = []
     total = 0
     page = 0
@@ -169,7 +365,6 @@ def main():
         input("Нажмите Enter...")
         return
 
-    # TUI навигация
     selected = 0
     offset = 0
 
@@ -184,7 +379,6 @@ def main():
         if offset < 0:
             offset = 0
 
-        # Отрисовка
         clear_screen()
         cols = 100
         try:
@@ -194,7 +388,7 @@ def main():
             pass
 
         print("┌" + "─" * (cols - 2) + "┐")
-        title = f"🎵 Результаты: '{query}' (всего: {total})"
+        title = f"Результаты: '{query}' (всего: {total})"
         print(f"│{title[:cols-2].ljust(cols-2)}│")
         print("├" + "─" * (cols - 2) + "┤")
 
@@ -213,12 +407,11 @@ def main():
                 print(f"│{''.ljust(cols-2)}│")
 
         print("├" + "─" * (cols - 2) + "┤")
-        status = "↑↓ — навигация | Enter — выбрать архив | q — выход"
+        status = "↑↓ — навигация | Enter — открыть | q — выход"
         print(f"│{status[:cols-2].ljust(cols-2)}│")
         print("└" + "─" * (cols - 2) + "┘")
 
         key = read_key()
-
         if key == 'q':
             break
         elif key == '\x1b[B' and selected < len(all_results) - 1:
@@ -227,22 +420,7 @@ def main():
             selected -= 1
         elif key in ('\r', '\n'):
             item = all_results[selected]
-            identifier = item['identifier']
-            title = item.get('title', 'Без названия')
-            
-            filename, download_all = choose_file_from_archive(identifier, title)
-            
-            if download_all:
-                all_files = get_audio_files(identifier)
-                if all_files:
-                    print(f"\n Скачивание всех {len(all_files)} файлов из '{title}'...")
-                    for f in all_files:
-                        download_file(identifier, f['name'])
-                    input("\n Все файлы скачаны! Нажмите Enter...")
-                else:
-                    input("Нет файлов для скачивания. Нажмите Enter...")
-            elif filename:
-                download_file(identifier, filename)
+            choose_from_archive(item['identifier'], item.get('title', 'Без названия'))
 
     clear_screen()
 
@@ -250,5 +428,4 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        clear_screen()
         print("\nВыход.")
