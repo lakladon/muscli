@@ -11,19 +11,21 @@ This script allows you to search for and download royalty-free music from the In
 - Human-readable file sizes (KB, MB)
 - Files are saved to `~/Music/free_archive/`
 - No automatic downloads — all actions require user confirmation
+- Modern PyQt5 GUI with system tray support
 
 ## Requirements
 
 - Python 3.6 or higher
 - `requests`
-- `tqdm`
+- `PyQt5`
+- `tqdm` (for CLI version)
 
 ## Installation
 
 1. Install dependencies:
 
 ```bash
-pip install requests tqdm
+pip install requests tqdm PyQt5
 ```
 
 2. Save the script as `lakarchive.py` (CLI) or `lakarchive_gui.py` (GUI).
