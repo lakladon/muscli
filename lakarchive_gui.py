@@ -365,6 +365,16 @@ class ArchiveMusicApp:
         list_frame = ttk.Frame(self.root)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
         
+        # Placeholder сообщение (метка)
+        self.placeholder_label = ttk.Label(
+            list_frame, 
+            text="💡 Это пустота, но вы можете решить это,\nесли напишите что-нибудь в поиске",
+            font=("Arial", 14),
+            foreground="gray",
+            anchor=tk.CENTER
+        )
+        self.placeholder_label.place(relx=0.5, rely=0.4, anchor=tk.CENTER)
+        
         self.tree = ttk.Treeview(list_frame, columns=("title", "creator", "downloads"), show="tree headings")
         self.tree.heading("#0", text="#")
         self.tree.heading("title", text="Название")
@@ -534,6 +544,10 @@ class ArchiveMusicApp:
         threading.Thread(target=_fetch, daemon=True).start()
     
     def _display_results(self, results, total):
+        # Скрываем placeholder при первом поиске
+        if self.current_page == 1:
+            self.placeholder_label.place_forget()
+        
         if self.current_page == 1:
             self.total = total
             self.status_label.config(text=f"Найдено: {total}")
