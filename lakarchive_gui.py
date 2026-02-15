@@ -365,16 +365,6 @@ class ArchiveMusicApp:
         list_frame = ttk.Frame(self.root)
         list_frame.pack(fill=tk.BOTH, expand=True, padx=10)
         
-        # Placeholder сообщение (метка)
-        self.placeholder_label = ttk.Label(
-            list_frame, 
-            text="💡 Это пустота, но вы можете решить это,\nесли напишите что-нибудь в поиске",
-            font=("Arial", 14),
-            foreground="gray",
-            anchor=tk.CENTER
-        )
-        self.placeholder_label.place(relx=0.5, rely=0.4, anchor=tk.CENTER)
-        
         self.tree = ttk.Treeview(list_frame, columns=("title", "creator", "downloads"), show="tree headings")
         self.tree.heading("#0", text="#")
         self.tree.heading("title", text="Название")
@@ -387,6 +377,16 @@ class ArchiveMusicApp:
         self.tree.column("downloads", width=80)
         
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Placeholder - показываем когда нет результатов
+        self.placeholder = tk.Label(
+            list_frame,
+            text="💡 Это пустота, но вы можете решить это,\nесли напишите что-нибудь в поиске",
+            font=("Arial", 12),
+            bg="#f0f0f0",
+            fg="gray"
+        )
+        self.placeholder.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -544,9 +544,9 @@ class ArchiveMusicApp:
         threading.Thread(target=_fetch, daemon=True).start()
     
     def _display_results(self, results, total):
-        # Скрываем placeholder при первом поиске
-        if self.current_page == 1:
-            self.placeholder_label.place_forget()
+        # Скрываем placeholder при появлении результатов
+        if self.current_page == 1 and len(results) > 0:
+            self.placeholder.place_forget()
         
         if self.current_page == 1:
             self.total = total
