@@ -312,12 +312,21 @@ class ArchiveMusicApp:
     
     def quit_app(self, icon=None, item=None):
         """Выход из приложения"""
+        # Сначала останавливаем трей
         if self.tray:
             try:
                 self.tray.stop()
             except:
                 pass
-        self.root.quit()
+        # Используем after для выхода из основного потока
+        self.root.after(100, self._force_quit)
+    
+    def _force_quit(self):
+        """Принудительный выход"""
+        try:
+            os._exit(0)
+        except:
+            pass
     
     def on_closing(self):
         """Обработка закрытия окна - сворачиваем в трей если трей активен"""
