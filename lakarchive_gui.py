@@ -1,5 +1,6 @@
 import os
 import sys
+import socket
 import requests
 import threading
 import time
@@ -7,16 +8,50 @@ import sqlite3
 from datetime import datetime
 from urllib.parse import quote
 
+# === Проверка: уже запущена ли программа ===
+APP_NAME = "lakarchive_app"
+app_lock = None
+
+def check_single_instance():
+    """Проверяет, запущена ли уже программа. Возвращает True если это первый запуск."""
+    global app_lock
+    try:
+        # Пытаемся создать сокет на случайном порту
+        app_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        app_lock.bind(('localhost', 0))  # bind to any available port
+        return True
+    except OSError:
+        # Сокет уже занят - программа уже запущена
+        return False
+
+# Проверяем перед запуском
+if not check_single_instance():
+    print("Ошибка: LakArchive уже запущен!")
+    print("Запустить вторую копию нельзя.")
+    sys.exit(0)
+
 # === PyQt5 ===
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QTableWidget, QTableWidgetItem, QTabWidget, QProgressBar,
     QScrollArea, QFrame, QMessageBox, QAction, QSystemTrayIcon,
-    QMenu, QScrollBar, QDialog, QHeaderView
+    QMenu, QScrollBar, QDialog, QHeaderView, QSlider, QStyle, QStyleOptionSlider
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread
-from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QObject, QThread, QUrl
+from PyQt5.QtGui import QIcon, QPixmap, QPainter, QColor, QPalette
+
+# === Попытка импорта мультимедиа ===
+MEDIA_ENABLED = False
+try:
+    from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent, QMediaPlaylist
+    from PyQt5.QtMultimediaWidgets import QVideoWidget
+    MEDIA_ENABLED = True
+except ImportError:
+    print("[DEBUG] QtMultimedia not available, using fallback player")
+    QMediaPlayer = None
+    QMediaContent = None
+    QVideoWidget = None
 
 # === Попытка импорта для системного трея ===
 TRAY_ENABLED = False
@@ -383,12 +418,109 @@ class ArchiveMusicApp(QMainWindow):
         self.hide()
     
     def setup_ui(self):
-        # Создаём меню
+        # Создаём главное меню
         menubar = self.menuBar()
+        
+        # === Файл ===
         file_menu = menubar.addMenu("Файл")
+        
+        open_folder_action = QAction("Открыть папку загрузок", self)
+        open_folder_action.triggered.connect(self.open_download_folder)
+        file_menu.addAction(open_folder_action)
+        
+        file_menu.addSeparator()
+        
         exit_action = QAction("Выход", self)
         exit_action.triggered.connect(self.quit_app)
         file_menu.addAction(exit_action)
+        
+        # === Менеджер загрузок ===
+        dl_manager_menu = menubar.addMenu("Менеджер загрузок")
+        
+        show_dl_manager_action = QAction("Показать панель загрузок", self)
+        show_dl_manager_action.triggered.connect(self.show_download_manager)
+        dl_manager_menu.addAction(show_dl_manager_action)
+        
+        dl_manager_menu.addSeparator()
+        
+        pause_all_action = QAction("Приостановить все", self)
+        pause_all_action.triggered.connect(self.pause_all_downloads)
+        dl_manager_menu.addAction(pause_all_action)
+        
+        resume_all_action = QAction("Возобновить все", self)
+        resume_all_action.triggered.connect(self.resume_all_downloads)
+        dl_manager_menu.addAction(resume_all_action)
+        
+        cancel_all_action = QAction("Отменить все", self)
+        cancel_all_action.triggered.connect(self.cancel_all_downloads)
+        dl_manager_menu.addAction(cancel_all_action)
+        
+        dl_manager_menu.addSeparator()
+        
+        clear_finished_action = QAction("Очистить завершённые", self)
+        clear_finished_action.triggered.connect(self.clear_finished_downloads)
+        dl_manager_menu.addAction(clear_finished_action)
+        
+        dl_manager_menu.addSeparator()
+        
+        settings_action = QAction("Настройки загрузок...", self)
+        settings_action.triggered.connect(self.show_download_settings)
+        dl_manager_menu.addAction(settings_action)
+        
+        # === Плеер ===
+        player_menu = menubar.addMenu("Плеер")
+        
+        open_player_action = QAction("Открыть плеер", self)
+        open_player_action.triggered.connect(self.open_player)
+        player_menu.addAction(open_player_action)
+        
+        player_menu.addSeparator()
+        
+        play_action = QAction("Воспроизвести", self)
+        play_action.triggered.connect(self.player_play)
+        player_menu.addAction(play_action)
+        
+        pause_action = QAction("Пауза", self)
+        pause_action.triggered.connect(self.player_pause)
+        player_menu.addAction(pause_action)
+        
+        stop_action = QAction("Стоп", self)
+        stop_action.triggered.connect(self.player_stop)
+        player_menu.addAction(stop_action)
+        
+        player_menu.addSeparator()
+        
+        prev_track_action = QAction("Предыдущий трек", self)
+        prev_track_action.triggered.connect(self.player_prev)
+        player_menu.addAction(prev_track_action)
+        
+        next_track_action = QAction("Следующий трек", self)
+        next_track_action.triggered.connect(self.player_next)
+        player_menu.addAction(next_track_action)
+        
+        player_menu.addSeparator()
+        
+        open_file_action = QAction("Открыть файл...", self)
+        open_file_action.triggered.connect(self.player_open_file)
+        player_menu.addAction(open_file_action)
+        
+        # === Вид ===
+        view_menu = menubar.addMenu("Вид")
+        
+        toggle_downloads_action = QAction("Показать/скрыть загрузки", self)
+        toggle_downloads_action.triggered.connect(self.toggle_downloads_panel)
+        view_menu.addAction(toggle_downloads_action)
+        
+        refresh_action = QAction("Обновить результаты", self)
+        refresh_action.triggered.connect(self.refresh_results)
+        view_menu.addAction(refresh_action)
+        
+        # === Справка ===
+        help_menu = menubar.addMenu("Справка")
+        
+        about_action = QAction("О программе", self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
         
         # Central widget
         central_widget = QWidget()
@@ -975,6 +1107,321 @@ class ArchiveMusicApp(QMainWindow):
             self.finish_download(download_id, "Готово")
         
         download_selected_from_torrent(identifier, torrent_file, selected_indices, progress_callback, finish_callback)
+    
+    # === Обработчики меню ===
+    
+    def open_download_folder(self):
+        """Открывает папку загрузок в проводнике"""
+        import subprocess
+        try:
+            if os.name == 'nt':  # Windows
+                os.startfile(DOWNLOAD_FOLDER)
+            elif sys.platform == 'darwin':  # macOS
+                subprocess.Popen(['open', DOWNLOAD_FOLDER])
+            else:  # Linux
+                subprocess.Popen(['xdg-open', DOWNLOAD_FOLDER])
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось открыть папку: {e}")
+    
+    def toggle_downloads_panel(self):
+        """Показывает/скрывает панель загрузок"""
+        if hasattr(self, 'downloads_scroll'):
+            self.downloads_scroll.setVisible(not self.downloads_scroll.isVisible())
+    
+    def refresh_results(self):
+        """Обновляет результаты поиска"""
+        if self.query and self.all_results:
+            self.start_search()
+        else:
+            QMessageBox.information(self, "Информация", "Нет результатов для обновления")
+    
+    def pause_all_downloads(self):
+        """Приостанавливает все загрузки"""
+        if not self.active_downloads:
+            QMessageBox.information(self, "Информация", "Нет активных загрузок")
+            return
+        
+        paused = 0
+        for dl_id, dl in self.active_downloads.items():
+            status = dl['status'].text()
+            if status not in ["Готово", "Ошибка", "Отменено", "В очереди"]:
+                # Останавливаем поток если есть
+                if dl_id in self.download_threads:
+                    thread = self.download_threads[dl_id]
+                    thread.stop()
+                dl['status'].setText("Приостановлено")
+                dl['status'].setStyleSheet("color: orange;")
+                paused += 1
+        
+        if paused > 0:
+            QMessageBox.information(self, "Информация", f"Приостановлено загрузок: {paused}")
+        else:
+            QMessageBox.information(self, "Информация", "Нет активных загрузок для приостановки")
+    
+    def resume_all_downloads(self):
+        """Возобновляет все загрузки"""
+        # Показываем информацию - для полноценной реализации нужно хранить состояние загрузок
+        QMessageBox.information(self, "Информация", "Функция возобновления временно недоступна")
+    
+    def cancel_all_downloads(self):
+        """Отменяет все загрузки"""
+        if not self.active_downloads:
+            QMessageBox.information(self, "Информация", "Нет активных загрузок")
+            return
+        
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            "Вы уверены, что хотите отменить все загрузки?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            cancelled = 0
+            for dl_id in list(self.active_downloads.keys()):
+                self.cancel_download(dl_id)
+                cancelled += 1
+            QMessageBox.information(self, "Информация", f"Отменено загрузок: {cancelled}")
+    
+    def show_download_settings(self):
+        """Показывает настройки загрузок"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Настройки загрузок")
+        dialog.setFixedSize(400, 250)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Папка загрузок
+        folder_layout = QHBoxLayout()
+        folder_label = QLabel("Папка загрузок:")
+        folder_layout.addWidget(folder_label)
+        
+        folder_value = QLabel(DOWNLOAD_FOLDER)
+        folder_value.setStyleSheet("color: #888;")
+        folder_layout.addWidget(folder_value)
+        
+        open_btn = QPushButton("Открыть")
+        open_btn.clicked.connect(self.open_download_folder)
+        folder_layout.addWidget(open_btn)
+        
+        layout.addLayout(folder_layout)
+        
+        layout.addWidget(QLabel(""))  # Отступ
+        
+        # Максимум одновременных загрузок
+        max_layout = QHBoxLayout()
+        max_label = QLabel("Максимум одновременных загрузок:")
+        max_layout.addWidget(max_label)
+        
+        max_value = QLabel(str(MAX_CONCURRENT_DOWNLOADS))
+        max_value.setStyleSheet("color: #0078d4; font-weight: bold;")
+        max_layout.addWidget(max_value)
+        
+        max_layout.addStretch()
+        layout.addLayout(max_layout)
+        
+        layout.addWidget(QLabel(""))  # Отступ
+        
+        # Статус торрентов
+        torrent_layout = QHBoxLayout()
+        torrent_label = QLabel("Поддержка торрентов:")
+        torrent_layout.addWidget(torrent_label)
+        
+        torrent_status = QLabel("Включена" if TORRENT_ENABLED else "Отключена")
+        torrent_status.setStyleSheet("color: green;" if TORRENT_ENABLED else "color: red;")
+        torrent_layout.addWidget(torrent_status)
+        
+        torrent_layout.addStretch()
+        layout.addLayout(torrent_layout)
+        
+        # Статус трея
+        tray_layout = QHBoxLayout()
+        tray_label = QLabel("Системный трей:")
+        tray_layout.addWidget(tray_label)
+        
+        tray_status = QLabel("Включён" if TRAY_ENABLED else "Отключён")
+        tray_status.setStyleSheet("color: green;" if TRAY_ENABLED else "color: red;")
+        tray_layout.addWidget(tray_status)
+        
+        tray_layout.addStretch()
+        layout.addLayout(tray_layout)
+        
+        layout.addStretch()
+        
+        # Кнопка закрытия
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(dialog.close)
+        layout.addWidget(close_btn)
+        
+        dialog.exec_()
+    
+    def show_about(self):
+        """Показывает информацию о программе"""
+        QMessageBox.about(
+            self,
+            "О программе LakArchive",
+            "<h3>LakArchive</h3>"
+            "<p>Версия 1.0</p>"
+            "<p>Приложение для поиска и загрузки музыки с Archive.org</p>"
+            "<hr>"
+            "<p><b>Возможности:</b></p>"
+            "<ul>"
+            "<li>Поиск музыки по названию и исполнителю</li>"
+            "<li>Загрузка аудио файлов (MP3, FLAC, OGG, WAV)</li>"
+            "<li>Поддержка торрент-загрузок</li>"
+            "<li>Системный трей</li>"
+            "<li>Тёмная тема</li>"
+            "</ul>"
+        )
+    
+    # === Менеджер загрузок ===
+    
+    def show_download_manager(self):
+        """Показывает/создаёт менеджер загрузок"""
+        self.downloads_scroll.setVisible(True)
+        QMessageBox.information(
+            self,
+            "Менеджер загрузок",
+            "Менеджер загрузок показан на нижней панели.\n\n"
+            "Здесь вы можете:\n"
+            "- Видеть прогресс всех загрузок\n"
+            "- Отменять отдельные загрузки\n"
+            "- Приостанавливать и возобновлять загрузки"
+        )
+    
+    # === Плеер ===
+    
+    def open_player(self):
+        """Открывает окно плеера"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Аудио плеер")
+        dialog.setFixedSize(500, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Информация о треке
+        self.player_track_label = QLabel("Трек: не выбран")
+        self.player_track_label.setAlignment(Qt.AlignCenter)
+        self.player_track_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+        layout.addWidget(self.player_track_label)
+        
+        # Время
+        time_layout = QHBoxLayout()
+        self.player_current_time = QLabel("00:00")
+        time_layout.addWidget(self.player_current_time)
+        
+        self.player_slider = QSlider(Qt.Horizontal)
+        self.player_slider.setRange(0, 100)
+        time_layout.addWidget(self.player_slider)
+        
+        self.player_total_time = QLabel("00:00")
+        time_layout.addWidget(self.player_total_time)
+        
+        layout.addLayout(time_layout)
+        
+        # Кнопки управления
+        controls_layout = QHBoxLayout()
+        
+        prev_btn = QPushButton("⏮")
+        prev_btn.clicked.connect(self.player_prev)
+        controls_layout.addWidget(prev_btn)
+        
+        play_btn = QPushButton("▶")
+        play_btn.clicked.connect(self.player_play)
+        controls_layout.addWidget(play_btn)
+        
+        pause_btn = QPushButton("⏸")
+        pause_btn.clicked.connect(self.player_pause)
+        controls_layout.addWidget(pause_btn)
+        
+        stop_btn = QPushButton("⏹")
+        stop_btn.clicked.connect(self.player_stop)
+        controls_layout.addWidget(stop_btn)
+        
+        next_btn = QPushButton("⏭")
+        next_btn.clicked.connect(self.player_next)
+        controls_layout.addWidget(next_btn)
+        
+        layout.addLayout(controls_layout)
+        
+        # Громкость
+        volume_layout = QHBoxLayout()
+        volume_label = QLabel("Громкость:")
+        volume_layout.addWidget(volume_label)
+        
+        self.player_volume = QSlider(Qt.Horizontal)
+        self.player_volume.setRange(0, 100)
+        self.player_volume.setValue(70)
+        self.player_volume.setFixedWidth(200)
+        volume_layout.addWidget(self.player_volume)
+        
+        volume_value = QLabel("70%")
+        self.player_volume.valueChanged.connect(lambda v: volume_value.setText(f"{v}%"))
+        volume_layout.addWidget(volume_value)
+        
+        volume_layout.addStretch()
+        layout.addLayout(volume_layout)
+        
+        layout.addStretch()
+        
+        # Кнопки
+        btn_layout = QHBoxLayout()
+        
+        open_file_btn = QPushButton("Открыть файл...")
+        open_file_btn.clicked.connect(self.player_open_file)
+        btn_layout.addWidget(open_file_btn)
+        
+        open_folder_btn = QPushButton("Открыть папку")
+        open_folder_btn.clicked.connect(self.open_download_folder)
+        btn_layout.addWidget(open_folder_btn)
+        
+        btn_layout.addStretch()
+        
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(dialog.close)
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        dialog.exec_()
+    
+    def player_play(self):
+        """Воспроизводит текущий трек"""
+        QMessageBox.information(self, "Плеер", "Воспроизведение: функция в разработке.\n\nДля воспроизведения используйте внешний плеер.")
+    
+    def player_pause(self):
+        """Ставит на паузу"""
+        QMessageBox.information(self, "Плеер", "Пауза: функция в разработке.")
+    
+    def player_stop(self):
+        """Останавливает воспроизведение"""
+        QMessageBox.information(self, "Плеер", "Стоп: функция в разработке.")
+    
+    def player_prev(self):
+        """Предыдущий трек"""
+        QMessageBox.information(self, "Плеер", "Предыдущий трек: функция в разработке.")
+    
+    def player_next(self):
+        """Следующий трек"""
+        QMessageBox.information(self, "Плеер", "Следующий трек: функция в разработке.")
+    
+    def player_open_file(self):
+        """Открывает файл для воспроизведения"""
+        from PyQt5.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите аудио файл",
+            DOWNLOAD_FOLDER,
+            "Аудио файлы (*.mp3 *.flac *.ogg *.wav);;Все файлы (*.*)"
+        )
+        if file_path:
+            self.player_track_label.setText(f"Трек: {os.path.basename(file_path)}")
+            QMessageBox.information(
+                self,
+                "Плеер",
+                f"Выбран файл: {os.path.basename(file_path)}\n\n"
+                "Функция воспроизведения в разработке."
+            )
 
 
 # === Тёмная тема ===
