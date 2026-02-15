@@ -7,8 +7,7 @@ import sqlite3
 from datetime import datetime
 from urllib.parse import quote
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
-from urllib.parse import quote
+from tkinter import ttk, messagebox
 
 # === Попытка импорта libtorrent (только для анализа метаданных) ===
 TORRENT_ENABLED = False
@@ -194,7 +193,8 @@ def download_selected_from_torrent(identifier, torrent_file, selected_indices, p
     thread.start()
 
 # === Простая загрузка аудио ===
-def download_file_simple(identifier, filename, progress_callback, finish_callback):
+def download_file_simple(identifier, filename, download_id, app_instance):
+    """Загрузка файла с обновлением прогресс-бара"""
     def _download():
         url = f"https://archive.org/download/{identifier}/{filename}"
         clean_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in filename)
@@ -209,12 +209,16 @@ def download_file_simple(identifier, filename, progress_callback, finish_callbac
                     f.write(chunk)
                     downloaded += len(chunk)
                     if total_size > 0:
-                        progress_callback(f"Загрузка: {downloaded}/{total_size} ({downloaded*100//total_size}%)")
+                        percent = downloaded * 100 // total_size
+                        app_instance.root.after(0, lambda: app_instance.update_download_progress(
+                            download_id, percent, f"{downloaded*100//total_size}%"
+                        ))
             add_to_db(identifier, filename, path)
-            progress_callback(f"✅ Сохранено: {path}")
+            app_instance.root.after(0, lambda: app_instance.finish_download(download_id, "Готово"))
         except Exception as e:
-            progress_callback(f"❌ Ошибка: {e}")
-        finish_callback()
+            app_instance.root.after(0, lambda: app_instance.finish_download(download_id, "Ошибка"))
+        
+        app_instance.root.after(0, lambda: setattr(app_instance, 'downloads_in_progress', app_instance.downloads_in_progress - 1))
     
     threading.Thread(target=_download, daemon=True).start()
 
@@ -224,13 +228,17 @@ class ArchiveMusicApp:
     def __init__(self, root):
         self.root = root
         self.root.title("LakArchive")
-        self.root.geometry("900x600")
+        self.root.geometry("900x650")
         
         self.all_results = []
         self.total = 0
         self.current_page = 0
         self.query = ""
         self.downloads_in_progress = 0
+        self.download_count = 0  # Счётчик для уникальных ID загрузок
+        
+        # Словарь для хранения виджетов загрузок: {download_id: {filename, progress_bar, status_label, frame}}
+        self.active_downloads = {}
         
         self.setup_ui()
         init_db()
@@ -286,33 +294,104 @@ class ArchiveMusicApp:
         
         self.tree.bind("<Double-1>", lambda e: self.open_archive())
         
-        # Нижняя панель - загрузки
+        # Нижняя панель - загрузки с индивидуальными прогресс-барами
         bottom_frame = ttk.LabelFrame(self.root, text="Загрузки")
-        bottom_frame.pack(fill=tk.X, padx=10, pady=10)
+        bottom_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Прогресс бар для загрузок
-        self.download_progress = ttk.Progressbar(bottom_frame, mode='determinate', length=200)
-        self.download_progress.pack(fill=tk.X, padx=5, pady=(5,0))
+        # Canvas с прокруткой для списка загрузок
+        self.downloads_canvas = tk.Canvas(bottom_frame, height=150)
+        self.downloads_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        self.download_log = scrolledtext.ScrolledText(bottom_frame, height=6, state=tk.DISABLED)
-        self.download_log.pack(fill=tk.X, padx=5, pady=5)
+        self.downloads_scrollbar = ttk.Scrollbar(bottom_frame, orient=tk.VERTICAL, command=self.downloads_canvas.yview)
+        self.downloads_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.downloads_canvas.configure(yscrollcommand=self.downloads_scrollbar.set)
+        
+        # Frame для размещения загрузок внутри canvas
+        self.downloads_container = ttk.Frame(self.downloads_canvas)
+        self.downloads_canvas.create_window((0, 0), window=self.downloads_container, anchor=tk.NW)
+        
+        self.downloads_container.bind("<Configure>", lambda e: self.downloads_canvas.configure(scrollregion=self.downloads_canvas.bbox("all")))
     
-    def log(self, message):
-        self.download_log.config(state=tk.NORMAL)
-        self.download_log.insert(tk.END, message + "\n")
-        self.download_log.see(tk.END)
-        self.download_log.config(state=tk.DISABLED)
+    def add_download(self, filename):
+        """Добавляет новую загрузку с индивидуальным прогресс-баром"""
+        self.download_count += 1
+        download_id = self.download_count
+        
+        # Frame для этой загрузки
+        frame = ttk.Frame(self.downloads_container)
+        frame.pack(fill=tk.X, padx=5, pady=2)
+        
+        # Имя файла
+        name_label = ttk.Label(frame, text=filename[:50], width=50, anchor=tk.W)
+        name_label.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Прогресс-бар
+        progress = ttk.Progressbar(frame, mode='determinate', length=300)
+        progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        
+        # Статус
+        status_label = ttk.Label(frame, text="0%", width=10)
+        status_label.pack(side=tk.LEFT, padx=5)
+        
+        # Кнопка отмены (крестик)
+        cancel_btn = ttk.Button(frame, text="✕", width=3, command=lambda: self.cancel_download(download_id))
+        cancel_btn.pack(side=tk.LEFT, padx=2)
+        
+        # Сохраняем виджеты
+        self.active_downloads[download_id] = {
+            'filename': filename,
+            'progress': progress,
+            'status': status_label,
+            'frame': frame,
+            'cancel_btn': cancel_btn,
+            'cancelled': False
+        }
+        
+        # Прокрутка к новой загрузке
+        self.downloads_canvas.update_idletasks()
+        self.downloads_canvas.yview_moveto(1)
+        
+        return download_id
     
-    def update_download_progress(self, current, total):
-        """Обновляет прогресс-бар загрузок"""
-        if total > 0:
-            self.download_progress['value'] = (current / total) * 100
-        else:
-            self.download_progress['value'] = 0
+    def update_download_progress(self, download_id, progress_value, status_text):
+        """Обновляет прогресс-бар конкретной загрузки"""
+        if download_id in self.active_downloads:
+            dl = self.active_downloads[download_id]
+            if not dl['cancelled']:
+                dl['progress']['value'] = progress_value
+                dl['status'].config(text=status_text)
     
-    def reset_download_progress(self):
-        """Сбрасывает прогресс-бар загрузок"""
-        self.download_progress['value'] = 0
+    def finish_download(self, download_id, status_text):
+        """Отмечает загрузку как завершённую"""
+        if download_id in self.active_downloads:
+            dl = self.active_downloads[download_id]
+            dl['progress']['value'] = 100
+            dl['status'].config(text=status_text, foreground="green")
+            # Скрываем кнопку отмены
+            if 'cancel_btn' in dl:
+                dl['cancel_btn'].pack_forget()
+    
+    def cancel_download(self, download_id):
+        """Отменяет загрузку (визуально)"""
+        if download_id in self.active_downloads:
+            dl = self.active_downloads[download_id]
+            dl['cancelled'] = True
+            dl['status'].config(text="Отменено", foreground="red")
+            # Скрываем кнопку отмены
+            if 'cancel_btn' in dl:
+                dl['cancel_btn'].pack_forget()
+    
+    def clear_finished_downloads(self):
+        """Удаляет завершённые загрузки из списка"""
+        to_remove = []
+        for dl_id, dl in self.active_downloads.items():
+            if dl['status'].cget("text") in ["Готово", "Ошибка", "Отменено"]:
+                to_remove.append(dl_id)
+        
+        for dl_id in to_remove:
+            dl = self.active_downloads.pop(dl_id)
+            dl['frame'].destroy()
     
     def start_search(self):
         query = self.search_entry.get().strip()
@@ -480,13 +559,11 @@ class ArchiveMusicApp:
                 
                 for idx in selected:
                     f = audio_files[idx]
-                    self.log(f"Загрузка: {f['name']}")
+                    # Добавляем загрузку в список и получаем её ID
+                    download_id = self.add_download(f['name'])
                     self.downloads_in_progress += 1
-                    download_file_simple(
-                        identifier, f['name'],
-                        lambda m: self.log(m),
-                        lambda i=idx: self._finish_audio_download(audio_tree, audio_checkboxes, identifier, audio_files)
-                    )
+                    # Запускаем загрузку
+                    download_file_simple(identifier, f['name'], download_id, self)
                 
                 # Clear selections after starting downloads
                 for item_id in audio_checkboxes:
@@ -595,41 +672,22 @@ class ArchiveMusicApp:
                 messagebox.showinfo("Информация", "Выберите файлы для загрузки")
                 return
             
-            self.log(f"Загрузка {len(selected)} файлов из торрента...")
+            # Добавляем загрузку в список
+            download_id = self.add_download(f"Торрент: {torrent_file['name']}")
             self.downloads_in_progress += 1
-            download_selected_from_torrent(
-                identifier, torrent_file, selected,
-                lambda m: self.log(m),
-                lambda: self._finish_torrent_download()
-            )
+            
+            def progress_callback(msg):
+                self.root.after(0, lambda: self.update_download_progress(download_id, 50, msg[:20]))
+            
+            def finish_callback():
+                self.root.after(0, lambda: self.finish_download(download_id, "Готово"))
+                self.root.after(0, lambda: setattr(self, 'downloads_in_progress', self.downloads_in_progress - 1))
+            
+            download_selected_from_torrent(identifier, torrent_file, selected, progress_callback, finish_callback)
             files_window.destroy()
         
         ttk.Button(btn_frame, text="Выбрать все", command=toggle_select).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Скачать выбранные", command=download_selected).pack(side=tk.LEFT, padx=5)
-    
-    def _finish_audio_download(self, tree, checkboxes, identifier, audio_files):
-        self.downloads_in_progress -= 1
-        # Refresh the list to show downloaded status
-        for item_id in checkboxes:
-            idx = checkboxes[item_id]
-            f = audio_files[idx]
-            path = is_already_downloaded(identifier, f['name'])
-            if path:
-                tree.item(item_id, values=(f['name'], human_size(int(f.get('size', 0))), "✓ Скачано"))
-    
-    def _finish_download(self, tree, idx, identifier, audio_files):
-        self.downloads_in_progress -= 1
-        if 0 <= idx < len(audio_files):
-            f = audio_files[idx]
-            path = is_already_downloaded(identifier, f['name'])
-            if path:
-                for item in tree.get_children():
-                    if tree.item(item)["text"] == str(idx + 1):
-                        tree.item(item, values=(f['name'], human_size(int(f.get('size', 0))), "✓ Скачано"))
-                        break
-    
-    def _finish_torrent_download(self):
-        self.downloads_in_progress -= 1
 
 
 def main():
