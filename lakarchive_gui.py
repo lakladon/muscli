@@ -223,7 +223,7 @@ def download_file_simple(identifier, filename, progress_callback, finish_callbac
 class ArchiveMusicApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Internet Archive Music Downloader")
+        self.root.title("LakArchive")
         self.root.geometry("900x600")
         
         self.all_results = []

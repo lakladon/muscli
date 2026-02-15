@@ -1,4 +1,4 @@
-# Internet Archive Music Downloader
+# LakArchive
 
 This script allows you to search for and download royalty-free music from the Internet Archive (archive.org). It provides a terminal-based interface with navigation using arrow keys and supports downloading individual files or entire collections.
 
@@ -26,14 +26,20 @@ This script allows you to search for and download royalty-free music from the In
 pip install requests tqdm
 ```
 
-2. Save the script as `archive_music_downloader.py`.
+2. Save the script as `lakarchive.py` (CLI) or `lakarchive_gui.py` (GUI).
 
 ## Usage
 
-Run the script:
+Run the CLI version:
 
 ```bash
-python archive_music_downloader.py
+python lakarchive.py
+```
+
+Or run the GUI version:
+
+```bash
+python lakarchive_gui.py
 ```
 
 1. Enter a search query (e.g., `Bonobo`, `live grateful dead`, `Kevin MacLeod`).
