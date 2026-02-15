@@ -9,6 +9,15 @@ from urllib.parse import quote
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+# === Попытка импорта для системного трея ===
+TRAY_ENABLED = False
+try:
+    from PIL import Image, ImageDraw
+    import pystray
+    TRAY_ENABLED = True
+except ImportError:
+    pass
+
 # === Попытка импорта libtorrent (только для анализа метаданных) ===
 TORRENT_ENABLED = False
 try:
@@ -223,6 +232,20 @@ def download_file_simple(identifier, filename, download_id, app_instance):
     threading.Thread(target=_download, daemon=True).start()
 
 
+# === Создание иконки для трея ===
+def create_tray_icon():
+    """Создаёт простую иконку для трея"""
+    width = 64
+    height = 64
+    image = Image.new('RGB', (width, height), color='white')
+    dc = ImageDraw.Draw(image)
+    # Рисуем простой музыкальный символ (нота)
+    dc.ellipse([16, 8, 48, 40], fill='#4CAF50', outline='#388E3C')
+    dc.rectangle([40, 20, 48, 56], fill='#388E3C')
+    dc.rectangle([44, 56, 56, 60], fill='#388E3C')
+    return image
+
+
 # === GUI Приложение ===
 class ArchiveMusicApp:
     def __init__(self, root):
@@ -240,8 +263,68 @@ class ArchiveMusicApp:
         # Словарь для хранения виджетов загрузок: {download_id: {filename, progress_bar, status_label, frame}}
         self.active_downloads = {}
         
+        # Настройка системного трея (только для Windows с pystray)
+        self.tray = None
+        self.setup_tray()
+        
+        # Обработка закрытия окна
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
         self.setup_ui()
         init_db()
+    
+    def setup_tray(self):
+        """Настраивает системный трей"""
+        if not TRAY_ENABLED:
+            return
+            
+        try:
+            image = create_tray_icon()
+            self.tray = pystray.Icon("lakarchive", image, "LakArchive", self.create_tray_menu())
+            # Запускаем трей в отдельном потоке
+            threading.Thread(target=self.tray.run, daemon=True).start()
+        except Exception as e:
+            print(f"Не удалось создать трей: {e}")
+            self.tray = None
+    
+    def create_tray_menu(self):
+        """Создаёт меню трея"""
+        menu = pystray.Menu(
+            pystray.MenuItem("Показать", self.show_window, default=True),
+            pystray.MenuItem("Выход", self.quit_app)
+        )
+        return menu
+    
+    def show_window(self, icon=None, item=None):
+        """Показывает окно приложения"""
+        self.root.after(0, self._show_window)
+    
+    def _show_window(self):
+        """Внутренний метод показа окна"""
+        self.root.deiconify()
+        self.root.state('normal')
+        self.root.lift()
+        self.root.focus()
+    
+    def hide_window(self):
+        """Скрывает окно в трей"""
+        self.root.withdraw()
+    
+    def quit_app(self, icon=None, item=None):
+        """Выход из приложения"""
+        if self.tray:
+            try:
+                self.tray.stop()
+            except:
+                pass
+        self.root.quit()
+    
+    def on_closing(self):
+        """Обработка закрытия окна - сворачиваем в трей если трей активен"""
+        if self.tray is not None and TRAY_ENABLED:
+            self.hide_window()
+        else:
+            self.quit_app()
     
     def setup_ui(self):
         # Верхняя панель - поиск
