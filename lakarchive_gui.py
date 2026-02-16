@@ -1740,11 +1740,11 @@ def main():
     if is_first_run():
         print("[DEBUG] First run detected, showing setup wizard")
         # Import QFileDialog for the wizard
-        from PyQt5.QtWidgets import QFileDialog
+        from PyQt5.QtWidgets import QFileDialog, QCheckBox, QSpinBox
         
         dialog = QDialog()
         dialog.setWindowTitle("LakArchive - Setup Wizard")
-        dialog.setFixedSize(500, 300)
+        dialog.setFixedSize(500, 450)
         dialog.setModal(True)
         
         layout = QVBoxLayout(dialog)
@@ -1755,7 +1755,7 @@ def main():
         layout.addWidget(title)
         
         # Description
-        desc = QLabel("Let's set up your download folder.")
+        desc = QLabel("Let's configure the application settings.")
         desc.setAlignment(Qt.AlignCenter)
         layout.addWidget(desc)
         
@@ -1788,6 +1788,47 @@ def main():
         
         layout.addWidget(QLabel(""))
         
+        # Max concurrent downloads
+        concurrent_layout = QHBoxLayout()
+        concurrent_label = QLabel("Max concurrent downloads:")
+        concurrent_layout.addWidget(concurrent_label)
+        
+        concurrent_spin = QSpinBox()
+        concurrent_spin.setRange(1, 10)
+        concurrent_spin.setValue(3)
+        concurrent_spin.setToolTip("Number of files to download simultaneously")
+        concurrent_layout.addWidget(concurrent_spin)
+        concurrent_layout.addStretch()
+        layout.addLayout(concurrent_layout)
+        
+        # Results per page
+        results_layout = QHBoxLayout()
+        results_label = QLabel("Results per page:")
+        results_layout.addWidget(results_label)
+        
+        results_spin = QSpinBox()
+        results_spin.setRange(10, 100)
+        results_spin.setValue(20)
+        results_spin.setSingleStep(10)
+        results_spin.setToolTip("Number of search results to load per page")
+        results_layout.addWidget(results_spin)
+        results_layout.addStretch()
+        layout.addLayout(results_layout)
+        
+        # Auto-create subfolder
+        subfolder_check = QCheckBox("Create subfolder for each archive")
+        subfolder_check.setChecked(True)
+        subfolder_check.setToolTip("Create a separate folder for each downloaded archive")
+        layout.addWidget(subfolder_check)
+        
+        # System tray
+        tray_check = QCheckBox("Show system tray icon")
+        tray_check.setChecked(True)
+        tray_check.setToolTip("Show icon in system tray when minimized")
+        layout.addWidget(tray_check)
+        
+        layout.addWidget(QLabel(""))
+        
         # Info
         info = QLabel("You can change these settings later in the application.")
         info.setStyleSheet("color: #888; font-size: 10pt;")
@@ -1811,9 +1852,11 @@ def main():
             # Save settings
             new_settings = {
                 "download_folder": folder_path.text(),
-                "results_per_page": 20,
-                "max_concurrent_downloads": 5,
-                "first_run": False
+                "results_per_page": results_spin.value(),
+                "max_concurrent_downloads": concurrent_spin.value(),
+                "first_run": False,
+                "auto_create_subfolder": subfolder_check.isChecked(),
+                "show_system_tray": tray_check.isChecked()
             }
             
             # Create folder if it doesn't exist
