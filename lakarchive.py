@@ -6,8 +6,13 @@ import time
 import sqlite3
 from datetime import datetime
 from urllib.parse import quote
-import termios
-import tty
+
+# Platform-specific imports
+if os.name == 'nt':
+    import msvcrt
+else:
+    import termios
+    import tty
 
 # === Try import libtorrent (only for metadata analysis) ===
 TORRENT_ENABLED = False
@@ -65,16 +70,35 @@ def add_to_db(archive_id, filename, local_path):
 
 # === Helper functions ===
 def read_key():
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == '\x1b':
-            ch += sys.stdin.read(2)
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    """Read a single key press. Works on both Windows and Unix."""
+    if os.name == 'nt':
+        # Windows: use msvcrt
+        ch = msvcrt.getch()
+        if ch == b'\xe0':  # Arrow key prefix
+            ch = msvcrt.getch()
+            if ch == b'H':  # Up arrow
+                return '\x1b[A'
+            elif ch == b'P':  # Down arrow
+                return '\x1b[B'
+        elif ch == b'\r':  # Enter
+            return '\r'
+        elif ch == b'q':  # q key
+            return 'q'
+        elif ch == b'Q':  # Q key
+            return 'q'
+        return ch.decode('utf-8', errors='ignore')
+    else:
+        # Unix: use termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                ch += sys.stdin.read(2)
+            return ch
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 def clear_screen():
     os.system('clear' if os.name == 'posix' else 'cls')
@@ -121,9 +145,9 @@ def get_audio_files(all_files):
         if f.get('format') in ['VBR MP3', 'MP3', 'FLAC', 'Ogg Vorbis', 'WAVE']
         and f.get('source') == 'original'
         and f.get('name')
-   orrent_files(all_files ]
+    ]
 
-def get_t):
+def get_torrent_files(all_files):
     return [
         f for f in all_files
         if f.get('name', '').endswith('.torrent')
@@ -374,8 +398,9 @@ def main():
         clear_screen()
         cols = 100
         try:
-            _, cols = os.popen('stty size', 'r').read().split()
-            cols = int(cols)
+            if os.name == 'posix':
+                _, cols = os.popen('stty size', 'r').read().split()
+                cols = int(cols)
         except:
             pass
 

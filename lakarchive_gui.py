@@ -5,6 +5,7 @@ import requests
 import threading
 import time
 import sqlite3
+import logging
 from datetime import datetime
 from urllib.parse import quote
 
@@ -55,12 +56,57 @@ try:
 except ImportError:
     pass
 
-# === Settings ===
-DOWNLOAD_FOLDER = os.path.expanduser("~/Music/free_archive")
+# === Settings / Config ===
+import json
+
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lakarchive_config.json")
+
+DEFAULT_SETTINGS = {
+    "download_folder": "G:\\",
+    "results_per_page": 20,
+    "max_concurrent_downloads": 5,
+    "first_run": True
+}
+
+def load_config():
+    """Load configuration from file. Returns dict with settings."""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            print(f"[DEBUG] Config loaded from: {CONFIG_FILE}")
+            return config
+        except Exception as e:
+            print(f"[DEBUG] Error loading config: {e}")
+    
+    print("[DEBUG] No config file found, using defaults")
+    return DEFAULT_SETTINGS.copy()
+
+def save_config(settings):
+    """Save configuration to file."""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
+        print(f"[DEBUG] Config saved to: {CONFIG_FILE}")
+        return True
+    except Exception as e:
+        print(f"[DEBUG] Error saving config: {e}")
+        return False
+
+def is_first_run():
+    """Check if this is the first run (no config file exists)."""
+    return not os.path.exists(CONFIG_FILE)
+
+# Load settings
+SETTINGS = load_config()
+DOWNLOAD_FOLDER = SETTINGS.get("download_folder", DEFAULT_SETTINGS["download_folder"])
+RESULTS_PER_PAGE = SETTINGS.get("results_per_page", DEFAULT_SETTINGS["results_per_page"])
+MAX_CONCURRENT_DOWNLOADS = SETTINGS.get("max_concurrent_downloads", DEFAULT_SETTINGS["max_concurrent_downloads"])
+
+# Create download folder if it doesn't exist
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+logging.info(f"DOWNLOAD_FOLDER set to: {DOWNLOAD_FOLDER}")
 DB_PATH = os.path.join(DOWNLOAD_FOLDER, "archive_downloads.db")
-RESULTS_PER_PAGE = 20
-MAX_CONCURRENT_DOWNLOADS = 5
 
 # === Database ===
 def init_db():
@@ -112,6 +158,14 @@ def human_size(size_bytes):
     return f"{size_bytes:.1f} TB"
 
 # === Archive.org work ===
+def check_server_connection():
+    """Check if archive.org server is reachable. Returns True if connected."""
+    try:
+        r = requests.get("https://archive.org/", timeout=5)
+        return r.status_code == 200
+    except:
+        return False
+
 def fetch_page(query, page, per_page=RESULTS_PER_PAGE):
     url = "https://archive.org/advancedsearch.php"
     params = {
@@ -287,6 +341,25 @@ class DownloadThread(QThread):
         self._is_running = False
 
 
+# === Search thread (async) ===
+class SearchThread(QThread):
+    """Async search thread to prevent UI freezing."""
+    search_finished_signal = pyqtSignal(list, int)
+    search_error_signal = pyqtSignal(str)
+    
+    def __init__(self, query, page):
+        super().__init__()
+        self.query = query
+        self.page = page
+    
+    def run(self):
+        try:
+            results, total = fetch_page(self.query, self.page)
+            self.search_finished_signal.emit(results, total)
+        except Exception as e:
+            self.search_error_signal.emit(str(e))
+
+
 # === Create tray icon ===
 def create_tray_icon():
     width = 64
@@ -332,7 +405,68 @@ class ArchiveMusicApp(QMainWindow):
         init_db()
         print("[DEBUG] DB init done")
         
+        # Set focus to tree widget after search
+        self.search_btn.clicked.connect(self.on_search_finished)
+        
         print("[DEBUG] ArchiveMusicApp.__init__ complete")
+    
+    def on_search_finished(self):
+        """Set focus to tree widget after search is done."""
+        if self.tree.topLevelItemCount() > 0:
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+            self.tree.setFocus()
+    
+    def on_tree_item_clicked(self, item, column):
+        """Handle single click on tree item - prepare for keyboard navigation."""
+        pass
+    
+    def keyPressEvent(self, event):
+        """Handle keyboard navigation in results list."""
+        key = event.key()
+        
+        # If no results, just pass to default handling
+        if self.tree.topLevelItemCount() == 0:
+            super().keyPressEvent(event)
+            return
+        
+        current_row = self.tree.currentIndex().row()
+        
+        if key == Qt.Key_Return or key == Qt.Key_Enter:
+            # Enter - open archive
+            self.open_archive(None, None)
+        elif key == Qt.Key_Down or key == Qt.Key_J:
+            # Down arrow or J - move to next item
+            if current_row < self.tree.topLevelItemCount() - 1:
+                self.tree.setCurrentItem(self.tree.topLevelItem(current_row + 1))
+                self.tree.scrollToItem(self.tree.topLevelItem(current_row + 1))
+        elif key == Qt.Key_Up or key == Qt.Key_K:
+            # Up arrow or K - move to previous item
+            if current_row > 0:
+                self.tree.setCurrentItem(self.tree.topLevelItem(current_row - 1))
+                self.tree.scrollToItem(self.tree.topLevelItem(current_row - 1))
+        elif key == Qt.Key_Home:
+            # Home - move to first item
+            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+            self.tree.scrollToItem(self.tree.topLevelItem(0))
+        elif key == Qt.Key_End:
+            # End - move to last item
+            last_idx = self.tree.topLevelItemCount() - 1
+            self.tree.setCurrentItem(self.tree.topLevelItem(last_idx))
+            self.tree.scrollToItem(self.tree.topLevelItem(last_idx))
+        elif key == Qt.Key_Space:
+            # Space - load more results
+            if self.more_btn.isEnabled():
+                self.load_more()
+        elif key == Qt.Key_Backspace or key == Qt.Key_Escape:
+            # Backspace/Escape - focus back to search
+            self.search_entry.setFocus()
+            self.search_entry.selectAll()
+        elif key == Qt.Key_F5:
+            # F5 - refresh results
+            self.refresh_results()
+        else:
+            # Pass to default handling for other keys
+            super().keyPressEvent(event)
     
     def setup_tray(self):
         if not TRAY_ENABLED:
@@ -533,6 +667,8 @@ class ArchiveMusicApp(QMainWindow):
         self.tree.setColumnWidth(2, 250)
         self.tree.setColumnWidth(3, 80)
         self.tree.itemDoubleClicked.connect(self.open_archive)
+        self.tree.itemClicked.connect(self.on_tree_item_clicked)
+        self.tree.setFocusPolicy(Qt.StrongFocus)
         main_layout.addWidget(self.tree)
         
         # Placeholder
@@ -689,24 +825,39 @@ class ArchiveMusicApp(QMainWindow):
         
         self.tree.clear()
         
-        self.load_more()
+        # Start async search
+        self._start_async_search()
     
-    def load_more(self):
-        if len(self.all_results) >= self.total and self.current_page > 0:
-            return
-        
+    def _start_async_search(self):
+        """Start asynchronous search to prevent UI freezing."""
         self.current_page += 1
         self.search_btn.setEnabled(False)
         self.more_btn.setEnabled(False)
         self.status_label.setText("Loading...")
         
-        try:
-            results, total = fetch_page(self.query, self.current_page)
-            self.status_label.setText(f"Loaded: {len(results)} of {total}")
-            self._display_results(results, total)
-        except Exception as e:
-            self.status_label.setText(f"Error: {str(e)}")
-            self.search_btn.setEnabled(True)
+        # Create and start search thread
+        self.search_thread = SearchThread(self.query, self.current_page)
+        self.search_thread.search_finished_signal.connect(self._on_search_finished)
+        self.search_thread.search_error_signal.connect(self._on_search_error)
+        self.search_thread.start()
+    
+    def _on_search_finished(self, results, total):
+        """Handle async search completion."""
+        self.status_label.setText(f"Loaded: {len(results)} of {total}")
+        self._display_results(results, total)
+    
+    def _on_search_error(self, error_msg):
+        """Handle async search error."""
+        self.status_label.setText(f"Error: {error_msg}")
+        self.search_btn.setEnabled(True)
+        self.current_page -= 1  # Reset page counter on error
+    
+    def load_more(self):
+        if len(self.all_results) >= self.total and self.current_page > 0:
+            return
+        
+        # Start async load more
+        self._start_async_search()
     
     def _display_results(self, results, total):
         print(f"[DEBUG] _display_results called: results={len(results)}, total={total}")
@@ -733,7 +884,11 @@ class ArchiveMusicApp(QMainWindow):
         for i, item in enumerate(results):
             idx = start_idx + i + 1
             title = item.get('title', '-')[:50]
-            creator = item.get('creator', '???')[:30]
+            creator = item.get('creator', '???')
+            # Handle creator being a list (multiple creators)
+            if isinstance(creator, list):
+                creator = ', '.join(str(c) for c in creator[:3])  # Join up to 3 creators
+            creator = str(creator)[:30]
             downloads = item.get('downloads', 0)
             
             tree_item = QTreeWidgetItem([str(idx), title, creator, str(downloads)])
@@ -749,6 +904,16 @@ class ArchiveMusicApp(QMainWindow):
             self.more_btn.setEnabled(True)
         else:
             self.progress_bar.setValue(100)
+        
+        # Update keyboard hints
+        self.update_keyboard_hints()
+    
+    def update_keyboard_hints(self):
+        """Update status bar with keyboard shortcuts hints."""
+        if self.all_results:
+            self.status_label.setText(f"Found: {self.total} | Keys: ↑↓ Navigate | Enter Open | Space More | Esc Search")
+        else:
+            self.status_label.setText("Enter a search query above")
     
     def open_archive(self, item, column):
         current_item = self.tree.currentItem()
@@ -1538,8 +1703,21 @@ QSystemTrayIcon {
 
 
 def main():
+    # Setup logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    
+    # Check server connection before starting
+    if not check_server_connection():
+        QMessageBox.critical(
+            None,
+            "Connection Error",
+            "Не удалось подключиться к серверу archive.org.\n\n"
+            "Проверьте подключение к интернету и попробуйте снова."
+        )
+        sys.exit(1)
     
     app.setStyleSheet(DARK_STYLESHEET)
     
@@ -1557,6 +1735,114 @@ def main():
     palette.setColor(palette.Highlight, QColor(0, 120, 212))
     palette.setColor(palette.HighlightedText, QColor(255, 255, 255))
     app.setPalette(palette)
+    
+    # Check if first run and show setup wizard if needed
+    if is_first_run():
+        print("[DEBUG] First run detected, showing setup wizard")
+        # Import QFileDialog for the wizard
+        from PyQt5.QtWidgets import QFileDialog
+        
+        dialog = QDialog()
+        dialog.setWindowTitle("LakArchive - Setup Wizard")
+        dialog.setFixedSize(500, 300)
+        dialog.setModal(True)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Title
+        title = QLabel("<h2>Welcome to LakArchive!</h2>")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
+        
+        # Description
+        desc = QLabel("Let's set up your download folder.")
+        desc.setAlignment(Qt.AlignCenter)
+        layout.addWidget(desc)
+        
+        layout.addWidget(QLabel(""))
+        
+        # Folder selection
+        folder_layout = QHBoxLayout()
+        folder_label = QLabel("Download folder:")
+        folder_layout.addWidget(folder_label)
+        
+        folder_path = QLineEdit()
+        folder_path.setText(DOWNLOAD_FOLDER)
+        folder_path.setReadOnly(True)
+        folder_layout.addWidget(folder_path)
+        
+        browse_btn = QPushButton("Browse...")
+        def browse_folder():
+            folder = QFileDialog.getExistingDirectory(
+                dialog, "Select Download Folder", 
+                DOWNLOAD_FOLDER if os.path.exists(DOWNLOAD_FOLDER) else os.path.expanduser("~")
+            )
+            if folder:
+                folder_path.setText(folder)
+                folder_path.setToolTip(folder)
+        
+        browse_btn.clicked.connect(browse_folder)
+        folder_layout.addWidget(browse_btn)
+        
+        layout.addLayout(folder_layout)
+        
+        layout.addWidget(QLabel(""))
+        
+        # Info
+        info = QLabel("You can change these settings later in the application.")
+        info.setStyleSheet("color: #888; font-size: 10pt;")
+        info.setAlignment(Qt.AlignCenter)
+        layout.addWidget(info)
+        
+        layout.addStretch()
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        finish_btn = QPushButton("Save & Continue")
+        finish_btn.setDefault(True)
+        
+        def save_and_close():
+            # Save settings
+            new_settings = {
+                "download_folder": folder_path.text(),
+                "results_per_page": 20,
+                "max_concurrent_downloads": 5,
+                "first_run": False
+            }
+            
+            # Create folder if it doesn't exist
+            folder = folder_path.text()
+            if folder:
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                except:
+                    pass
+            
+            if save_config(new_settings):
+                dialog.accept()
+            else:
+                QMessageBox.warning(dialog, "Error", "Failed to save configuration!")
+        
+        finish_btn.clicked.connect(save_and_close)
+        btn_layout.addWidget(finish_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Show dialog
+        result = dialog.exec_()
+        
+        if result != QDialog.Accepted:
+            # User cancelled - exit application
+            print("[DEBUG] Setup wizard cancelled, exiting")
+            sys.exit(0)
+        
+        print("[DEBUG] Setup completed, continuing to main window")
     
     window = ArchiveMusicApp()
     window.show()
